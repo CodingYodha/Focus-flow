@@ -11,3 +11,6 @@ streamlit-webrtc
 plyer
 psutil
 moviepy
+streamlit-audiorecorder # For real-time voice input
+pytube # To help identify YouTube content (part of a better Guardian)
+tinydb # A simple, file-based database for user profiles & gamification

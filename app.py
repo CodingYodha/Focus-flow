@@ -1,146 +1,140 @@
 # File: app.py
 
 import streamlit as st
-import pandas as pd
-import cv2
-from fer import FER
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import datetime as dt
-import pytz
-import time # We'll use this for the polling loop
+from streamlit_audiorecorder import audiorecorder
+import google.generativeai as genai
+import os
+import time
 
-# Import our custom modules
-from ai_coach import get_coach_advice
-from google_calendar_agent import get_calendar_service, get_events_in_range
+# Import our custom V2 modules
+from database import *
+from agentic_ai import get_gemini_model_with_function_calling, process_user_request
 
-st.set_page_config(layout="wide", page_title="FocusFlow Co-Pilot")
+# --- Page Configuration ---
+st.set_page_config(layout="wide", page_title="FocusFlow V2")
 
-st.title("🚀 FocusFlow Co-Pilot")
-st.write("Your autonomous AI agent for productivity and wellness. First, run the schedulers in your terminal, then use this dashboard.")
+# --- Initialize Session State ---
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "demo_user" # Hardcoded for the demo
+if "profile" not in st.session_state:
+    st.session_state.profile = get_user_profile(st.session_state.user_id)
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "gemini_model" not in st.session_state:
+    st.session_state.gemini_model = get_gemini_model_with_function_calling()
 
-INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
-
-# --- START: FIX 1 - PRE-LOAD THE HEAVY MODEL ---
-# This decorator tells Streamlit to run this function only once and cache the result.
-# This prevents the slow FER model from being reloaded on every interaction.
-@st.cache_resource
-def load_fer_model():
-    print("Loading FER model...")
-    return FER(mtcnn=True)
-
-# Load the model into a global variable when the app starts.
-fer_detector = load_fer_model()
-# --- END: FIX 1 ---
-
-def robust_datetime_parser(datetime_str):
-    if datetime_str.endswith('Z'):
-        return dt.datetime.fromisoformat(datetime_str[:-1] + '+00:00')
-    return dt.datetime.fromisoformat(datetime_str)
-
-# --- Session State Initialization ---
-if "emotion" not in st.session_state:
-    st.session_state.emotion = "neutral"
-
-# --- Emotion Detection Video Transformer ---
-class EmotionTransformer(VideoTransformerBase):
-    def __init__(self):
-        # Now, we just reference the pre-loaded global model. This is instantaneous.
-        self.fer_detector = fer_detector
-        self.dominant_emotion = "neutral"
-
-    def transform(self, frame):
-        img_rgb = frame.to_ndarray(format="bgr24")
-        detected_faces = self.fer_detector.detect_emotions(img_rgb)
+# --- Onboarding / Profile Setup ---
+if not st.session_state.profile:
+    st.title("Welcome to FocusFlow V2!")
+    st.write("Let's set up your profile to personalize your experience.")
+    with st.form("profile_form"):
+        name = st.text_input("What's your name?")
+        user_type = st.selectbox("Are you a school or college student?", ["School", "College"])
+        in_time_str = st.time_input("What time do you go to your institution?").strftime("%H:%M")
+        out_time_str = st.time_input("What time do you get back?").strftime("%H:%M")
         
-        if detected_faces:
-            bounding_box = detected_faces[0]["box"]
-            emotions = detected_faces[0]["emotions"]
-            self.dominant_emotion = max(emotions, key=emotions.get)
-            
-            x, y, w, h = bounding_box
-            cv2.rectangle(img_rgb, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(img_rgb, f"Emotion: {self.dominant_emotion}", (x, y - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-        return img_rgb
-
-# --- Main App Columns ---
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.header("😊 Emotional Check-in")
-    st.write("Activate your webcam for a moment so the AI coach can understand your emotional state.")
+        submitted = st.form_submit_button("Save Profile")
+        if submitted:
+            profile_data = {
+                "name": name, "user_type": user_type,
+                "in_time": in_time_str, "out_time": out_time_str
+            }
+            save_user_profile(st.session_state.user_id, profile_data)
+            init_gamification_stats(st.session_state.user_id)
+            st.session_state.profile = profile_data
+            st.success("Profile saved! Please refresh the page.")
+            st.rerun()
+else:
+    # --- Main Application Dashboard ---
+    st.sidebar.title(f"Welcome back, {st.session_state.profile['name']}!")
     
-    # --- START: FIX 2 & 3 - IMPROVE CONNECTION SETTINGS ---
-    # Define a list of STUN servers for better reliability
-    STUN_SERVERS = {
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]},
-        ]
+    # --- Gamification Dashboard in Sidebar ---
+    stats = get_gamification_stats(st.session_state.user_id)
+    if stats:
+        st.sidebar.subheader("Your Stats")
+        st.sidebar.metric("Level", stats['level'])
+        st.sidebar.metric("Points", stats['points'])
+        
+        # Simple progress bar for leveling up
+        points_in_level = stats['points'] % 500
+        st.sidebar.progress(points_in_level / 500, text=f"{points_in_level}/500 Points to next level")
+
+    # --- Social Leaderboard ---
+    st.sidebar.subheader("Friend Leaderboard")
+    # For a hackathon, we can use mock data to show the concept
+    leaderboard_data = {
+        "Name": [st.session_state.profile['name'], "Alex", "Brenda"],
+        "Level": [stats['level'], 12, 10]
     }
+    st.sidebar.dataframe(leaderboard_data, hide_index=True)
     
-    ctx = webrtc_streamer(
-        key="emotion-check", 
-        video_transformer_factory=EmotionTransformer,
-        rtc_configuration=STUN_SERVERS, # Use the list of STUN servers
-        async_processing=True,
-        # Give the connection up to 30 seconds to initialize, instead of the default 10
-        media_stream_constraints={"video": True, "audio": False},
-        #async_processing_timeout=30 
-    )
-    # --- END: FIX 2 & 3 ---
-
-    # This label will now update in real-time.
-    emotion_placeholder = st.empty()
-    emotion_placeholder.write(f"**Current Detected Emotion:** {st.session_state.emotion.capitalize()}")
-
-    if ctx.state.playing and ctx.video_transformer:
-        # Continuously update the emotion
-        current_emotion = ctx.video_transformer.dominant_emotion
-        if st.session_state.emotion != current_emotion:
-            st.session_state.emotion = current_emotion
-            emotion_placeholder.write(f"**Current Detected Emotion:** {st.session_state.emotion.capitalize()}")
-
-
-with col2:
-    st.header("🗓️ Your Day at a Glance")
+    # --- Main Page Layout ---
+    st.title("FocusFlow V2: Your Sentient Study Partner")
     
-    if st.button("Sync Calendar & Get Coach's Tip", type="primary"):
-        with st.spinner("Connecting to Google Calendar and consulting the AI coach..."):
-            # ... (The rest of your code for this column remains the same)
-            service = get_calendar_service()
-            if service:
-                now_ist = dt.datetime.now(INDIAN_TIMEZONE)
-                events = get_events_in_range(service, now_ist, now_ist + dt.timedelta(days=1))
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.header("🤖 Agentic Assistant")
+        st.write("Talk to your AI assistant. Ask it to schedule tasks, tell you your plan, or just chat.")
+
+        # --- Real-time Voice & Chat Interface ---
+        audio_bytes = audiorecorder("Click to talk to your assistant", "Recording...")
+        if audio_bytes:
+            # Save audio and transcribe with Gemini
+            with st.spinner("Transcribing your voice..."):
+                audio_file_path = "temp_audio.wav"
+                with open(audio_file_path, "wb") as f:
+                    f.write(audio_bytes)
                 
-                if not events:
-                    st.write("No upcoming events found in your calendar for the next 24 hours.")
-                    schedule_summary = "Your schedule is clear for today!"
-                else:
-                    event_list = []
-                    for event in events:
-                        start_str = event['start'].get('dateTime', event['start'].get('date'))
-                        start_dt = robust_datetime_parser(start_str).astimezone(INDIAN_TIMEZONE)
-                        event_list.append({
-                            "Task": event['summary'],
-                            "Time": start_dt.strftime('%I:%M %p')
-                        })
-                    
-                    schedule_df = pd.DataFrame(event_list)
-                    st.dataframe(schedule_df, use_container_width=True, hide_index=True)
-                    schedule_summary = schedule_df.to_string()
+                # Use Gemini-1.5-pro for audio transcription (or a local model)
+                your_file = genai.upload_file(path=audio_file_path)
+                prompt = "Transcribe this audio recording."
+                model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
+                response = model.generate_content([prompt, your_file])
+                user_prompt = response.text
+                st.write(f"**You said:** {user_prompt}")
 
-                advice = get_coach_advice(schedule_summary, st.session_state.emotion)
-                st.subheader("💡 Coach's Tip for You")
-                st.markdown(f"> {advice}")
-            else:
-                st.error("Failed to connect to Google Calendar.")
+                # Process the transcribed text with our agent
+                with st.spinner("Assistant is thinking..."):
+                    ai_response, history = process_user_request(st.session_state.gemini_model, user_prompt, st.session_state.chat_history)
+                    st.session_state.chat_history = history
 
-st.markdown("---")
-st.info("""
-**How to Use This Project:**
-1.  **Run the Scheduler:** Open a terminal and run `python autonomous_scheduler.py`.
-2.  **Run the Guardian:** In a *second* terminal, run `python reel_stopper_agent.py`.
-3.  **Use the Dashboard:** Interact with this web app.
-""")
+        # Display Chat History
+        for message in reversed(st.session_state.chat_history):
+             role = "AI" if message.role == "model" else "You"
+             with st.chat_message(role):
+                 st.markdown(message.parts[0].text)
+
+    with col2:
+        st.header("🎯 Daily Quests & Focus Mode")
+        
+        # --- Daily Task Checklist ---
+        st.subheader("Today's Quests")
+        # Mock daily tasks for the demo
+        daily_tasks = ["Review CS101 notes", "Complete Math P-Set", "Read one chapter of History"]
+        for task in daily_tasks:
+            is_completed = st.checkbox(task, key=f"task_{task}")
+            if is_completed:
+                # This logic should be more robust to not award points on every rerun
+                # Using a flag in session_state is one way
+                if f"task_{task}_done" not in st.session_state:
+                    level_up_msg = update_gamification_stats(st.session_state.user_id, points_to_add=50)
+                    st.session_state[f"task_{task}_done"] = True
+                    if level_up_msg: st.toast(level_up_msg)
+        
+        st.subheader("Guardian Focus Mode")
+        focus_duration = st.slider("Select Focus Duration (minutes):", 1, 60, 25)
+        
+        if st.button("Start Focus Session", type="primary"):
+            st.success(f"Focus session started for {focus_duration} minutes! Avoid distractions to earn bonus points.")
+            
+            # This is where the improved guardian logic would run
+            # It's hard to run a true background process reliably from Streamlit Cloud
+            # For a hackathon demo, we simulate it:
+            with st.spinner(f"Running focus session... You have {focus_duration} minutes."):
+                time.sleep(focus_duration * 1) # Use a shorter sleep for the demo, e.g., *1 for seconds
+            
+            st.success("Focus Session Complete!")
+            level_up_msg = update_gamification_stats(st.session_state.user_id, points_to_add=100, sessions_to_add=1)
+            if level_up_msg: st.toast(level_up_msg)
+            st.balloons()
