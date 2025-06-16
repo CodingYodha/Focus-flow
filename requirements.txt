@@ -11,6 +11,6 @@ streamlit-webrtc
 plyer
 psutil
 moviepy
-git+https://github.com/stefanrmmr/streamlit-audiorecorder.git
+streamlit-audiorecorder==0.0.6
 pytube
 tinydb
