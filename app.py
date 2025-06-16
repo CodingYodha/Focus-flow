@@ -17,8 +17,17 @@ st.set_page_config(layout="wide", page_title="FocusFlow Co-Pilot")
 st.title("🚀 FocusFlow Co-Pilot")
 st.write("Your autonomous AI agent for productivity and wellness. First, run the schedulers in your terminal, then use this dashboard.")
 
-# --- EDITED FOR INDIAN TIMEZONE ---
 INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
+
+# --- EDITED TO FIX THE BUG ---
+def robust_datetime_parser(datetime_str):
+    """
+    A more robust parser that can handle ISO strings ending with 'Z'.
+    This is the new helper function to fix the bug.
+    """
+    if datetime_str.endswith('Z'):
+        return dt.datetime.fromisoformat(datetime_str[:-1] + '+00:00')
+    return dt.datetime.fromisoformat(datetime_str)
 
 # --- Session State Initialization ---
 if "emotion" not in st.session_state:
@@ -32,24 +41,17 @@ class EmotionTransformer(VideoTransformerBase):
 
     def transform(self, frame):
         img_rgb = frame.to_ndarray(format="bgr24")
-        
-        # The FER library returns a list of detected faces
         detected_faces = self.fer_detector.detect_emotions(img_rgb)
         
         if detected_faces:
-            # Select the first detected face
             bounding_box = detected_faces[0]["box"]
             emotions = detected_faces[0]["emotions"]
-            
-            # Find the dominant emotion
             self.dominant_emotion = max(emotions, key=emotions.get)
             
-            # Draw rectangle and text on the frame
             x, y, w, h = bounding_box
             cv2.rectangle(img_rgb, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(img_rgb, f"Emotion: {self.dominant_emotion}", (x, y - 10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
         return img_rgb
 
 # --- Main App Columns ---
@@ -62,7 +64,7 @@ with col1:
     ctx = webrtc_streamer(
         key="emotion-check", 
         video_transformer_factory=EmotionTransformer,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]} # STUN server for WebRTC
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
     if ctx.video_transformer:
@@ -72,13 +74,11 @@ with col1:
 with col2:
     st.header("🗓️ Your Day at a Glance")
     
-    # This button fetches calendar data and gets advice
     if st.button("Sync Calendar & Get Coach's Tip", type="primary"):
         with st.spinner("Connecting to Google Calendar and consulting the AI coach..."):
             service = get_calendar_service()
             if service:
                 now_ist = dt.datetime.now(INDIAN_TIMEZONE)
-                # Get events for the next 24 hours
                 events = get_events_in_range(service, now_ist, now_ist + dt.timedelta(days=1))
                 
                 if not events:
@@ -88,17 +88,18 @@ with col2:
                     event_list = []
                     for event in events:
                         start_str = event['start'].get('dateTime', event['start'].get('date'))
-                        start_dt = dt.datetime.fromisoformat(start_str).astimezone(INDIAN_TIMEZONE)
+                        # --- EDITED TO USE THE ROBUST PARSER ---
+                        # Use our new robust function to handle the 'Z' format correctly
+                        start_dt = robust_datetime_parser(start_str).astimezone(INDIAN_TIMEZONE)
                         event_list.append({
                             "Task": event['summary'],
-                            "Time": start_dt.astimezone().strftime('%I:%M %p')
+                            "Time": start_dt.strftime('%I:%M %p')
                         })
                     
                     schedule_df = pd.DataFrame(event_list)
                     st.dataframe(schedule_df, use_container_width=True, hide_index=True)
                     schedule_summary = schedule_df.to_string()
 
-                # Get the AI coach's advice
                 advice = get_coach_advice(schedule_summary, st.session_state.emotion)
                 st.subheader("💡 Coach's Tip for You")
                 st.markdown(f"> {advice}")
@@ -108,7 +109,7 @@ with col2:
 st.markdown("---")
 st.info("""
 **How to Use This Project:**
-1.  **Run the Scheduler:** Open a terminal and run `python autonomous_scheduler.py`. This will populate your Google Calendar. **You only need to do this once.**
-2.  **Run the Guardian:** In a *second* terminal, run `python reel_stopper_agent.py`. This will run continuously in the background to watch for distractions.
+1.  **Run the Scheduler:** Open a terminal and run `python autonomous_scheduler.py`. This will populate your Google Calendar.
+2.  **Run the Guardian:** In a *second* terminal, run `python reel_stopper_agent.py`. This will run continuously.
 3.  **Use the Dashboard:** Interact with this web app to perform your emotional check-in and get daily advice.
 """)
