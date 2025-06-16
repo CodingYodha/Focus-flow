@@ -33,7 +33,7 @@ def get_coach_advice(schedule_summary, detected_emotion):
     """
 
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:

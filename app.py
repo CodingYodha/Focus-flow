@@ -7,6 +7,7 @@ from fer import FER
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import datetime as dt
 import pytz
+import time # We'll use this for the polling loop
 
 # Import our custom modules
 from ai_coach import get_coach_advice
@@ -19,12 +20,19 @@ st.write("Your autonomous AI agent for productivity and wellness. First, run the
 
 INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
 
-# --- EDITED TO FIX THE BUG ---
+# --- START: FIX 1 - PRE-LOAD THE HEAVY MODEL ---
+# This decorator tells Streamlit to run this function only once and cache the result.
+# This prevents the slow FER model from being reloaded on every interaction.
+@st.cache_resource
+def load_fer_model():
+    print("Loading FER model...")
+    return FER(mtcnn=True)
+
+# Load the model into a global variable when the app starts.
+fer_detector = load_fer_model()
+# --- END: FIX 1 ---
+
 def robust_datetime_parser(datetime_str):
-    """
-    A more robust parser that can handle ISO strings ending with 'Z'.
-    This is the new helper function to fix the bug.
-    """
     if datetime_str.endswith('Z'):
         return dt.datetime.fromisoformat(datetime_str[:-1] + '+00:00')
     return dt.datetime.fromisoformat(datetime_str)
@@ -36,7 +44,8 @@ if "emotion" not in st.session_state:
 # --- Emotion Detection Video Transformer ---
 class EmotionTransformer(VideoTransformerBase):
     def __init__(self):
-        self.fer_detector = FER(mtcnn=True)
+        # Now, we just reference the pre-loaded global model. This is instantaneous.
+        self.fer_detector = fer_detector
         self.dominant_emotion = "neutral"
 
     def transform(self, frame):
@@ -61,21 +70,45 @@ with col1:
     st.header("😊 Emotional Check-in")
     st.write("Activate your webcam for a moment so the AI coach can understand your emotional state.")
     
+    # --- START: FIX 2 & 3 - IMPROVE CONNECTION SETTINGS ---
+    # Define a list of STUN servers for better reliability
+    STUN_SERVERS = {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+        ]
+    }
+    
     ctx = webrtc_streamer(
         key="emotion-check", 
         video_transformer_factory=EmotionTransformer,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        rtc_configuration=STUN_SERVERS, # Use the list of STUN servers
+        async_processing=True,
+        # Give the connection up to 30 seconds to initialize, instead of the default 10
+        media_stream_constraints={"video": True, "audio": False},
+        #async_processing_timeout=30 
     )
+    # --- END: FIX 2 & 3 ---
 
-    if ctx.video_transformer:
-        st.session_state.emotion = ctx.video_transformer.dominant_emotion
-        st.write(f"**Current Detected Emotion:** {st.session_state.emotion.capitalize()}")
+    # This label will now update in real-time.
+    emotion_placeholder = st.empty()
+    emotion_placeholder.write(f"**Current Detected Emotion:** {st.session_state.emotion.capitalize()}")
+
+    if ctx.state.playing and ctx.video_transformer:
+        # Continuously update the emotion
+        current_emotion = ctx.video_transformer.dominant_emotion
+        if st.session_state.emotion != current_emotion:
+            st.session_state.emotion = current_emotion
+            emotion_placeholder.write(f"**Current Detected Emotion:** {st.session_state.emotion.capitalize()}")
+
 
 with col2:
     st.header("🗓️ Your Day at a Glance")
     
     if st.button("Sync Calendar & Get Coach's Tip", type="primary"):
         with st.spinner("Connecting to Google Calendar and consulting the AI coach..."):
+            # ... (The rest of your code for this column remains the same)
             service = get_calendar_service()
             if service:
                 now_ist = dt.datetime.now(INDIAN_TIMEZONE)
@@ -88,8 +121,6 @@ with col2:
                     event_list = []
                     for event in events:
                         start_str = event['start'].get('dateTime', event['start'].get('date'))
-                        # --- EDITED TO USE THE ROBUST PARSER ---
-                        # Use our new robust function to handle the 'Z' format correctly
                         start_dt = robust_datetime_parser(start_str).astimezone(INDIAN_TIMEZONE)
                         event_list.append({
                             "Task": event['summary'],
@@ -109,7 +140,7 @@ with col2:
 st.markdown("---")
 st.info("""
 **How to Use This Project:**
-1.  **Run the Scheduler:** Open a terminal and run `python autonomous_scheduler.py`. This will populate your Google Calendar.
-2.  **Run the Guardian:** In a *second* terminal, run `python reel_stopper_agent.py`. This will run continuously.
-3.  **Use the Dashboard:** Interact with this web app to perform your emotional check-in and get daily advice.
+1.  **Run the Scheduler:** Open a terminal and run `python autonomous_scheduler.py`.
+2.  **Run the Guardian:** In a *second* terminal, run `python reel_stopper_agent.py`.
+3.  **Use the Dashboard:** Interact with this web app.
 """)
