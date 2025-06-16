@@ -1,0 +1,13 @@
+streamlit
+pandas
+plotly
+google-generativeai
+google-api-python-client
+google-auth-oauthlib
+opencv-python-headless
+fer
+tensorflow
+streamlit-webrtc
+plyer
+psutil
+moviepy
